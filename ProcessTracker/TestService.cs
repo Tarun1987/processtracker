@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Diagnostics;
 using System.ServiceProcess;
-using System.Linq;
 using System.Timers;
 using ProcessTracker.Helpers;
 using ProcessTracker.Data;
@@ -34,48 +33,84 @@ namespace ProcessTracker
         private void OnElapsedTime(object source, ElapsedEventArgs e)
         {
             Logger.LogInfo($"Replay time. {_interval}");
-            CheckProcessStatus();
+            CheckApplicationsStatus();
         }
 
-        private void CheckProcessStatus()
+        private void CheckApplicationsStatus()
         {
             var dataLayer = new DataAccessLayer();
 
             // Get all processes from DB
-            var dbProcessList = dataLayer.GetAllProcesses();
-            if (dbProcessList?.Count <= 0)
+            var dbApplications = dataLayer.GetAllApplications();
+            if (dbApplications?.Count <= 0)
             {
                 Logger.LogInfo("Process list don't exists in database.");
                 return;
             }
 
-            // Get all processes which are running on command prompt.
-            var runningProcessesList = Process.GetProcessesByName("cmd");
-            foreach (var dbprocess in dbProcessList)
+            foreach (var dbprocess in dbApplications)
             {
-                var runningProcess = runningProcessesList.FirstOrDefault(x => x.MainWindowTitle == dbprocess.ProcessName);
-
                 // Process NOT RUNNING and ACTIVE in DB
-                if (runningProcess == null && dbprocess.Activate)
+                if (dbprocess.ProcessId <= 0 && dbprocess.Activate)
                 {
-                    Process.Start(dbprocess.ActivatorFilePath);
-                    Logger.LogInfo($"Process started. ProcessName:{dbprocess.ProcessName}");
+                    try
+                    {
+                        var startingProcess = Process.Start(dbprocess.ActivatorFilePath);
+                        if (startingProcess.Id > 0)
+                        {
+                            dbprocess.ProcessId = startingProcess.Id;
+                            dbprocess.MemoryUsage = startingProcess.WorkingSet64 / 1024 / 1024;
+                            dbprocess.CpuUsage = 5;
+                            // Set CPU usage and memory usage.
+                            Logger.LogInfo($"Process started. ProcessName:{dbprocess.ProcessName}");
+                        }
+                        else
+                            Logger.LogInfo($"Process not started. ProcessName:{dbprocess.ProcessName}");
+                    }
+                    catch (Exception)
+                    {
+                        Logger.LogInfo($"Process not started. ProcessName:{dbprocess.ProcessName}");
+                    }
                 }
                 // Process RUNNING and INACTIVE in  DB
-                else if (runningProcess != null && !dbprocess.Activate)
+                else if (dbprocess.ProcessId > 0 && !dbprocess.Activate)
                 {
                     // Stop process
-                    Process.Start(dbprocess.DeActivatorFilePath);
-                    Logger.LogInfo($"Process stopped. ProcessName:{dbprocess.ProcessName}");
+                    var stoppingProcess = Process.Start(dbprocess.DeActivatorFilePath);
+                    if (stoppingProcess.Id > 0)
+                    {
+                        dbprocess.ProcessId = 0;
+                        dbprocess.CpuUsage = 0;
+                        dbprocess.MemoryUsage = 0;
+                        try
+                        {
+                            Process proc = Process.GetProcessById(dbprocess.ProcessId);
+                            proc.Kill();
+                        }
+                        catch (Exception)
+                        {
+                            throw;
+                        }
+                        Logger.LogInfo($"Process stopped. ProcessName:{dbprocess.ProcessName}");
+                    }
+                    else
+                        Logger.LogInfo($"Process could not be stopped. ProcessName:{dbprocess.ProcessName}");
                 }
                 else
                 {
-                    Logger.LogInfo($"No action required. ProcessName: {dbprocess.ProcessName}");
+                    Logger.LogInfo($"No action required. ProcessName: {dbprocess.ProcessName} | ProcessId: {dbprocess.ProcessId}");
                 }
 
             }
-        }
 
+            // Now stave status of all process in database
+            var isDbUpdated = dataLayer.UpdateApplicationsStatus(dbApplications);
+            if (isDbUpdated)
+                Logger.LogInfo("Database updated.");
+            else
+                Logger.LogError("Database not updated");
+
+        }
     }
 }
 
